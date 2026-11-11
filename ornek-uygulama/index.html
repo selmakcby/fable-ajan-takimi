@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' file: 'unsafe-inline'; style-src 'unsafe-inline'">
+<title>Masraf Bölüşme</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 1rem auto; padding: 0 1rem; color: #222; }
+  section { border: 1px solid #ddd; border-radius: 8px; padding: .75rem 1rem; margin-bottom: 1rem; }
+  h2 { font-size: 1.1rem; margin: .2rem 0 .6rem; }
+  ul { padding-left: 1.2rem; } li { margin: .25rem 0; }
+  input, select, button { font: inherit; padding: .25rem .4rem; }
+  .pay { display: flex; gap: .5rem; align-items: center; margin: .2rem 0; }
+  .pay input[type=text] { width: 6rem; }
+  .arti { color: #0a7a2f; } .eksi { color: #b3261e; }
+  #hata { color: #b3261e; min-height: 1.2em; }
+  .kucuk { font-size: .85rem; color: #666; }
+</style>
+</head>
+<body>
+<h1>Masraf Bölüşme</h1>
+<p id="hata" role="alert"></p>
+
+<section>
+  <h2>Kişiler</h2>
+  <form id="kisiForm">
+    <input id="kisiIsim" placeholder="İsim" maxlength="50" required>
+    <button>Ekle</button>
+  </form>
+  <ul id="kisiListe"></ul>
+</section>
+
+<section>
+  <h2>Masraf ekle</h2>
+  <form id="masrafForm">
+    <p><input id="aciklama" placeholder="Açıklama (ör. Market)" maxlength="100"></p>
+    <p><input id="tutar" placeholder="Tutar (12,50)" inputmode="decimal" required>
+       Ödeyen: <select id="odeyen"></select></p>
+    <p>
+      <label><input type="radio" name="mod" value="esit" checked> Eşit böl</label>
+      <label><input type="radio" name="mod" value="ozel"> Kişiye özel tutar</label>
+    </p>
+    <div id="paylar"></div>
+    <button>Masrafı ekle</button>
+  </form>
+</section>
+
+<section>
+  <h2>Bakiyeler</h2>
+  <ul id="bakiyeListe"></ul>
+</section>
+
+<section>
+  <h2>Hesaplaşma</h2>
+  <p id="hesapNot" class="kucuk" hidden></p>
+  <ul id="hesapListe"></ul>
+</section>
+
+<section>
+  <h2>Masraflar</h2>
+  <ul id="masrafListe"></ul>
+</section>
+
+<script src="bolusme.js"></script>
+<script>
+'use strict';
+const B = window.Bolusme;
+const ANAHTAR = 'masraf-bolusme-v1';
+const $ = (id) => document.getElementById(id);
+
+// Kayıtlı veriyi doğrudan güvenmeden, saf fonksiyonlardan geçirerek yeniden kurar.
+// Okunamazsa ham veri yedek anahtara kopyalanır; yedek alınamazsa kayıt kilitlenir ki eski veri ezilmesin.
+let kayitKilitli = false;
+
+function bozukVeriyiYedekle(hamMetin) {
+  const yedekAnahtar = `${ANAHTAR}-bozuk-${Date.now()}`;
+  try {
+    localStorage.setItem(yedekAnahtar, hamMetin);
+    hataGoster(`Kayıtlı veri okunamadı; eski veri "${yedekAnahtar}" anahtarına yedeklendi, boş başlatıldı.`);
+  } catch (e) {
+    kayitKilitli = true;
+    hataGoster('Kayıtlı veri okunamadı ve yedeklenemedi; eski veriyi korumak için kayıt kapalı.');
+  }
+}
+
+function yukle() {
+  let hamMetin = null;
+  try {
+    hamMetin = localStorage.getItem(ANAHTAR);
+    const ham = JSON.parse(hamMetin || 'null');
+    if (!ham) return B.bosDurum();
+    const kisili = ham.kisiler.reduce(B.kisiEkle, B.bosDurum());
+    return ham.masraflar.reduce((d, m) => B.masrafEkle(d, {
+      aciklama: m.aciklama, tutar: m.tutar, odeyen: m.odeyen,
+      ozel: m.paylar.map((p) => ({ kisi: p.kisi, tutar: p.tutar })),
+    }), kisili);
+  } catch (e) {
+    if (hamMetin !== null) bozukVeriyiYedekle(hamMetin);
+    else { kayitKilitli = true; hataGoster('Tarayıcı depolaması okunamadı; kayıt kapalı.'); }
+    return B.bosDurum();
+  }
+}
+
+let durum = B.bosDurum();
+
+function kaydet() {
+  if (kayitKilitli) return;
+  try { localStorage.setItem(ANAHTAR, JSON.stringify(durum)); }
+  catch (e) { hataGoster('Kaydedilemedi: tarayıcı depolaması kullanılamıyor.'); }
+}
+
+function hataGoster(mesaj) { $('hata').textContent = mesaj; }
+
+function uygula(fn) {
+  try {
+    durum = fn(durum);
+    hataGoster('');
+    kaydet();
+    ciz();
+  } catch (e) {
+    hataGoster(e.message);
+  }
+}
+
+function el(etiket, metin, sinif) {
+  const e = document.createElement(etiket);
+  if (metin !== undefined) e.textContent = metin;
+  if (sinif) e.className = sinif;
+  return e;
+}
+
+function dugme(metin, tikla) {
+  const b = el('button', metin);
+  b.type = 'button';
+  b.addEventListener('click', tikla);
+  return b;
+}
+
+function ozelMod() { return document.querySelector('input[name=mod]:checked').value === 'ozel'; }
+
+// Yeniden çizimde işaretler ve yazılan tutarlar korunur; yeni kişi işaretli gelir.
+function paySecimleri() {
+  const kutular = [...document.querySelectorAll('#paylar input')];
+  return new Map(durum.kisiler.map((k) => {
+    const sec = kutular.find((i) => i.type === 'checkbox' && i.dataset.kisi === k);
+    const miktar = kutular.find((i) => i.type === 'text' && i.dataset.kisi === k);
+    return [k, { secili: sec ? sec.checked : true, miktar: miktar ? miktar.value : '' }];
+  }));
+}
+
+function payAlanlariniCiz(onceki) {
+  const kutu = $('paylar');
+  kutu.replaceChildren(...durum.kisiler.map((k) => {
+    const eski = onceki.get(k) || { secili: true, miktar: '' };
+    const satir = el('label', undefined, 'pay');
+    const sec = el('input'); sec.type = 'checkbox'; sec.checked = eski.secili; sec.dataset.kisi = k;
+    const miktar = el('input'); miktar.type = 'text'; miktar.placeholder = '0,00'; miktar.value = eski.miktar;
+    miktar.dataset.kisi = k; miktar.hidden = !ozelMod();
+    satir.append(sec, el('span', k), miktar);
+    return satir;
+  }));
+}
+
+function ciz() {
+  const oncekiOdeyen = $('odeyen').value;
+  const oncekiPaylar = paySecimleri();
+  $('kisiListe').replaceChildren(...durum.kisiler.map((k) => {
+    const li = el('li', k + ' ');
+    li.append(dugme('Çıkar', () => uygula((d) => B.kisiCikar(d, k))));
+    return li;
+  }));
+
+  $('odeyen').replaceChildren(...durum.kisiler.map((k) => {
+    const o = el('option', k); o.value = k; return o;
+  }));
+  if (durum.kisiler.includes(oncekiOdeyen)) $('odeyen').value = oncekiOdeyen;
+  payAlanlariniCiz(oncekiPaylar);
+
+  const bak = B.bakiyeler(durum);
+  $('bakiyeListe').replaceChildren(...Object.entries(bak).map(([k, v]) => {
+    const durumMetni = v > 0 ? 'alacaklı' : v < 0 ? 'borçlu' : 'hesap kapalı';
+    return el('li', `${k}: ${B.kurusYaz(v)} (${durumMetni})`, v > 0 ? 'arti' : v < 0 ? 'eksi' : '');
+  }));
+
+  const sifirDisi = Object.values(bak).filter((v) => v !== 0).length;
+  $('hesapNot').hidden = sifirDisi <= B.KESIN_COZUM_SINIRI;
+  $('hesapNot').textContent = `Borçlu/alacaklı sayısı ${B.KESIN_COZUM_SINIRI} sınırını aştı: liste herkesi sıfırlar ama en az transfer garanti değil.`;
+  const transferler = B.hesaplas(bak);
+  $('hesapListe').replaceChildren(...(transferler.length
+    ? transferler.map((t) => el('li', `${t.kimden} → ${t.kime}: ${B.kurusYaz(t.tutar)}`))
+    : [el('li', 'Herkes ödeşmiş.', 'kucuk')]));
+
+  $('masrafListe').replaceChildren(...durum.masraflar.slice().reverse().map((m) => {
+    const li = el('li', `${m.aciklama || 'Masraf'} — ${B.kurusYaz(m.tutar)}, ödeyen ${m.odeyen} `);
+    li.append(dugme('Sil', () => uygula((d) => B.masrafSil(d, m.id))));
+    li.append(el('div', m.paylar.map((p) => `${p.kisi}: ${B.kurusYaz(p.tutar)}`).join(', '), 'kucuk'));
+    return li;
+  }));
+}
+
+$('kisiForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const isim = $('kisiIsim').value;
+  uygula((d) => B.kisiEkle(d, isim));
+  if (!$('hata').textContent) $('kisiIsim').value = '';
+});
+
+document.querySelectorAll('input[name=mod]').forEach((r) => r.addEventListener('change', () => {
+  document.querySelectorAll('#paylar input[type=text]').forEach((i) => { i.hidden = !ozelMod(); });
+}));
+
+$('masrafForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  uygula((d) => {
+    const tutar = B.kurusaCevir($('tutar').value);
+    const secili = [...document.querySelectorAll('#paylar input[type=checkbox]')]
+      .filter((c) => c.checked).map((c) => c.dataset.kisi);
+    const temel = { aciklama: $('aciklama').value, tutar, odeyen: $('odeyen').value };
+    if (!ozelMod()) return B.masrafEkle(d, { ...temel, katilimcilar: secili });
+    const ozel = secili.map((k) => {
+      const kutu = document.querySelector(`#paylar input[type=text][data-kisi="${CSS.escape(k)}"]`);
+      return { kisi: k, tutar: B.kurusaCevir(kutu.value || '0') };
+    });
+    return B.masrafEkle(d, { ...temel, ozel });
+  });
+  if (!$('hata').textContent) {
+    $('tutar').value = ''; $('aciklama').value = '';
+    document.querySelectorAll('#paylar input[type=text]').forEach((i) => { i.value = ''; });
+  }
+});
+
+durum = yukle();
+ciz();
+</script>
+</body>
+</html>
